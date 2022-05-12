@@ -1,0 +1,411 @@
+---
+title: "Figure Generation TBIO588"
+author: "Sidharth Jain"
+date: "2/1/2022"
+output: pdf_document
+---
+```{r setup, echo = F}
+library(tidyverse)
+library(survival)
+library(survminer)
+library(ggsignif)
+library(gridExtra)
+library(readxl)
+library(illuminaHumanv4.db)
+library(fgsea)
+library(limma)
+library(gage)
+```
+## Figure 1
+
+### Figure 1a - Kaplan Meier survival curve based on TCGA data provided with statistical analysis
+```{r fig1}
+# Read and clean data
+
+TCGA_surv <- read_delim("Figure 1/TCGA_PDAC_XYZ_strat_surv.txt",
+delim = "\t", escape_double = FALSE,
+trim_ws = TRUE, name_repair = "universal")
+
+TCGA_surv <- TCGA_surv %>%
+  mutate(XYZ_mRNA_Expression = factor(XYZ.Expression.Status, levels = c("Low", "Medium", "High"))) %>%
+  mutate(Years.from.diagnosis = Days.from.diagnosis/365) %>%
+  mutate(Status = Status..0..alive..1..deceased.)
+  
+# Fit to survival curve
+fit <- survfit(Surv(time = Years.from.diagnosis, event = Status) ~ XYZ_mRNA_Expression, data = TCGA_surv)
+fit.test <- survdiff(Surv(time = Years.from.diagnosis, event = Status) ~ XYZ_mRNA_Expression, data = TCGA_surv)
+names(fit$strata) <- c("Low", "Medium", "High")
+#fit$strata <- fit$strata[c("Low", "Medium", "High")]
+
+fig1a = ggsurvplot(fit, 
+           data = TCGA_surv,
+           #conf.int = T,
+           pval = T, pval.method = T, pval.coord = c(5, 0.8), pval.method.coord = c(5,0.9),
+           palette = "npg")
+
+fig1a$plot <- fig1a$plot +
+  theme(axis.ticks = element_blank()) +
+  labs(x = "Time (Years from diagnosis)", color = "XYZ mRNA expression")
+
+# Save plot
+ggsave(plot = fig1a$plot, filename = "Figure 1/Figure1a_Jain.tiff", width = 5, height = 4, units = "in", dpi = 300)
+```
+
+### Figure 1b - Presentation of analysis of TMA data
+```{r}
+PDAC_TMA <- read_csv("Figure 1/TMA PDAC Patients_XYZ_status.csv")
+table(PDAC_TMA$pathology, PDAC_TMA$Staining)
+
+PDAC_TMA_clean <- PDAC_TMA %>%
+  mutate(grade = replace(grade, grade %in% c("1--2", "1 -- 2"), "2")) %>%
+  mutate(grade = replace(grade, grade %in% c("2--3", "2 -- 3"), "3")) %>%
+  mutate(grade = replace(grade, grade == "-", "0 (Normal)")) %>%
+  mutate(grade = relevel(as.factor(grade), "0 (Normal)")) %>%
+  mutate(Staining = replace(Staining, Staining == "-", "Negative")) %>%
+  mutate(Staining = replace(Staining, Staining == "+", "Positive")) %>%
+  mutate(age = as.numeric(age)) %>%
+  mutate(age = replace_na(age, replace = 1/12))
+
+percent_annot <- PDAC_TMA_clean %>%
+  group_by(grade) %>%
+  summarize(`Positive` = sum(Staining=="Positive")/n(), `Negative` = sum(Staining=="Negative")/n()) %>%
+  pivot_longer(cols = c(`Positive`, `Negative`), names_to = "Staining", values_to = "percentages")
+
+fit = glm(as.factor(Staining) ~ grade * age * sex, data = PDAC_TMA_clean, family = "binomial")
+
+fig1b_1 = ggplot(data = PDAC_TMA_clean, aes(x = grade, fill = factor(Staining))) +
+  geom_bar(position = "dodge") +
+  geom_label(aes(label = paste0(round(100*(..count.. / tapply(..count.., ..x.., sum)[as.character(..x..)]), digits = 1), "%"), group = Staining), stat = "count", position = position_dodge(width = 1), vjust = 0, show.legend = F) +
+  ylim(c(0, 90)) +
+  ggpubr::theme_pubr() +
+  theme(axis.ticks = element_blank()) +
+  fill_palette("npg") +
+  labs(x = "Tumor Grade", y = "Number of TMA Slides", fill = "XYZ Protein Stain")
+
+# Is there a difference in age between + and -?
+#PDAC_TMA %>% group_by(Staining) %>% rstatix::t_test(age ~ sex)
+# 
+# fig1b_2 = ggplot(data = PDAC_TMA, aes(y = age, x = sex, fill = Staining)) +
+#   geom_boxplot() +
+#   geom_signif(xmin = c(0.75, 1.75, 0.7, 1.25), 
+#               xmax = c(1.25, 2.25, 1.85, 2.35), 
+#               y_position = c(25, 25, 20, 15), 
+#               annotations = c("p = 0.00016", "p = 0.00066", "NS", "NS"), 
+#               angle = 360, tip_length = 0, color = rep(c("black", "black", "#F8766D", "#00BFC4"), 3), hjust = -0.1) +
+#   coord_flip() +
+#   labs(x = "Age", y = "Sex") +
+#   theme_pubr(legend = "none")
+
+#fig1b = grid.arrange(arrangeGrob(grobs = list(fig1b_1, fig1b_2), widths = c(10), heights = c(15, 15), ncol = 1))
+ggsave(filename = "Figure 1/Fig1b_Jain.tiff", plot = fig1b_1, width = 5, height = 4, units = 'in', dpi = 300)
+```
+
+### Combine Figure 1
+```{r}
+#g1 = grid.arrange(g1a$plot, g1b, nrow = 1)
+#ggsave(g1, filename = "Figure 1/Figure1_Jain.tiff", height = 300, width = 300, units = 'mm', dpi = 300)
+```
+
+# Figure 2
+
+### Figure 2a - qRT-PCR for XYZ in PANC-1 (with dox-inducible shRNA)
+```{r}
+# Synthesize some fake RT-PCR data
+#devtools::install_github('MahShaaban/pcr')
+library(pcr)
+data.file <- system.file('extdata', 'ct1.csv', package = 'pcr')
+ct1 <- readr::read_csv(data.file) %>%
+  dplyr::rename(shXYZ = `c_myc`)
+new_rows <- ct1 %>% 
+  dplyr::rename(Scrambled = `shXYZ`) %>%
+  dplyr::slice(7:12) %>% 
+  dplyr::slice_sample(n = 12, replace = T)
+
+group_var <- rep(c('+dox', '-dox'), each = 6)
+# calculate all values and errors in one step
+## mode == 'separate_tube' default
+res1 <- pcr_analyze(ct1,
+                   group_var = group_var,
+                   reference_gene = 'GAPDH',
+                   reference_group = '-dox', plot = F) 
+
+res2 <- pcr_analyze(new_rows,
+                   group_var = group_var,
+                   reference_gene = 'GAPDH',
+                   reference_group = "-dox", plot = F)
+
+df <- rbind(res1, res2) %>%
+  mutate(xpos = ifelse(group == "-dox", 1, 2))
+
+annotation_df <- data.frame(
+  gene = c("shXYZ", "Scrambled", "shXYZ"),
+  start = c(0.8, 1.8, 1.2),
+  end = c(1.2, 2.2, 2.2),
+  y = c(1.1, 1.1, 1.2),
+  label = c("NS", "p < 0.001", "p < 0.001"),
+  group = c("-dox", "+dox", "+dox")
+)
+
+fig2a = ggplot(data = df, aes(x = gene, y = relative_expression, fill = gene, alpha = group)) +
+  geom_bar(position = position_dodge(width = 0.8), stat = "identity", width = 0.8) +
+  geom_errorbar(aes(ymin = lower, ymax = upper, group = group), position = position_dodge(width = 0.8), width = 0.1, alpha = 1) +
+   geom_signif(
+     data = annotation_df, 
+     aes(xmin = start, xmax = end, annotations = label, y_position = y), 
+     manual = T, alpha = 1, fill = "black", tip_length = 0) +
+  fill_palette("npg") +
+  guides(fill = F) +
+  scale_alpha_discrete(range = c(0.4, 1)) +
+  theme_pubr(legend = "top") +
+  theme(axis.ticks = element_blank()) +
+  labs(x = "", y = "Relative XYZ mRNA Expression\n (GAPDH-normalized)", alpha = "Treatment") +
+  ylim(c(0, 1.3)) #+
+  #facet_wrap(~gene, switch = 'x')
+
+ggsave(plot = fig2a, filename = "Figure 2/Fig2a.tiff", dpi = 300, width = 4, height = 7, units = "in")
+```
+
+### Figure 2b - Growth curve of PANC-1 with XYZ knockdown
+```{r}
+prolif_data <- read_csv(file = "Figure 2/ProliferationData.csv", col_select = 1:3)
+prolif_data <- prolif_data %>%
+  dplyr::mutate(Time = sapply(Time, function(x) strsplit(x, split = " ", fixed = T)[[1]][2]) %>% as.numeric()) %>%
+  dplyr::rename(Days = Time) %>%
+  dplyr::rename(`NumberOfCells` = `# of cells (10^4)`) %>%
+  filter(Days != 0)
+
+prolif_stats <- prolif_data %>%
+  dplyr::mutate(Days.f = as.factor(as.character(Days))) %>%
+  filter(Days.f == "4") %>%
+  group_by(Days.f) %>%
+  rstatix::pairwise_t_test(NumberOfCells ~ Treatment, comparisons = list(c("Scramble", "shXYZ"), c("shXYZ", "shXYZ + XYZ"), c("Scramble", "shXYZ + XYZ")), detailed = T)
+
+fig2b <- ggplot(data = prolif_data, aes(x = Days, y = NumberOfCells, color = Treatment, fill = Treatment)) +
+  geom_smooth(se = T, method = "loess", span = 1) +
+  geom_point(aes(x = Days, y = NumberOfCells, color = Treatment), size = 5, inherit.aes = F) +
+  geom_segment(aes(x = 4.1, y=15, xend = 4.1, yend = 105), color = "grey30", arrow = arrow(angle = 90, ends = "both", length = unit(1, "mm")), show.legend = F) +
+  annotate(geom = "text", x = 3.8, y = 60, label = "p < 0.001", angle = 90) +
+  color_palette("npg") +
+  fill_palette("npg") +
+  ggpubr::theme_pubr(legend = "top") +
+  theme(axis.ticks = element_blank()) +
+  labs(x = "Time (Days)", y = bquote('Numer of cells ('*10^4*')'), fill = "Condition", color = "Condition")
+
+ggsave(plot = fig2b, filename = "Figure 2/Fig2b.tiff", dpi = 300, width = 4, height = 4, units = "in")
+```
+
+### Figure 2d - Western blot quantification
+```{r fig2c}
+westernblot_quant <- read.csv("~/Documents/Research/Classes/TBIO588/Figure 2/western blots/westernblot_quant", sep="")
+
+westernblot_quant <- westernblot_quant %>%
+  pivot_longer(cols = c(pERK, XYZ, pAKT), names_to = "probe", values_to = "inv.measure") %>%
+  mutate(measure = 255 - inv.measure - 90)
+
+westernblot_quant %>%
+  group_by(probe) %>%
+  rstatix::pairwise_t_test()
+
+signif_df <- data.frame(
+  probe = c("pAKT", "pAKT", "pAKT", "pERK", "pERK", "pERK", "XYZ", "XYZ", "XYZ"),
+  xstart = c(0.66, 0.66, 1, 1.66, 1.66, 2, 2.66, 2.66, 3),
+  xend = c(1, 1.33, 1.33, 2, 2.33, 2.33, 3, 3.33, 3.33), 
+  y = c(80, 90, 100, 130, 140, 150, 80, 170, 180)
+)
+
+westernblot_quant$probe <- factor(westernblot_quant$probe, levels = c("XYZ", "pERK", "pAKT"))
+
+fig2c <- ggplot(data = westernblot_quant, aes(x = probe, y = measure, fill = condition)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  fill_palette("npg") +
+  labs(x = "", y = "Intensity (AU)", fill = "") +
+  facet_wrap(~probe, nrow = 3, scales = "free_x") +
+  theme_pubr(legend = "bottom") +
+  theme(axis.ticks = element_blank(), axis.text.x = element_blank())
+
+ggsave(filename = "Figure 2/Fig2d.tiff", plot = fig2c, dpi = 300, width = 3, height = 4)
+
+```
+
+# Figure 3
+
+### Figure 3b
+```{r}
+Panc_1_tumor_growth_data <- read_excel("Figure 3/Panc-1 tumor growth data.xlsx", 
+    skip = 1, .name_repair = "none")
+
+colnames(Panc_1_tumor_growth_data)[3:10] <- paste0(colnames(Panc_1_tumor_growth_data)[3:10], "_shScrambled")
+colnames(Panc_1_tumor_growth_data)[11:18] <- paste0(colnames(Panc_1_tumor_growth_data)[11:18], "_shXYZ")
+
+tum_growth_data <- Panc_1_tumor_growth_data %>%
+  pivot_longer(cols = starts_with("Mouse"), names_to = "Flank_Condition", values_to = "size") %>%
+  dplyr::rename(Time=`Day from injection`) %>%
+  separate(col = "Flank_Condition", into = c("Area", "Condition"), sep = "_") %>%
+  separate(col = "Area", into = c("Animal", "Number", "Flank"))
+
+tum_growth_data_summ <- tum_growth_data %>%
+  group_by(Number, Condition, Time) %>%
+  summarize(Avg.Vol = mean(size, na.rm = T), ) %>%
+  filter(!is.na(Avg.Vol))
+  
+
+
+# linear mixed effects modeling for growth curve
+fit = aov(size ~ Time * Condition * Dox + Error(Number), data = tum_growth_data)
+
+# fig3b = ggplot(tum_growth_data %>% dplyr::select(-Dox), aes(x = Time, y = size)) +
+#   geom_line(aes(color = paste0(Condition, ", Mouse #", Number), linetype = Flank)) +
+#   scale_color_manual(values = c('#b2182b','#d6604d','#f4a582','#fddbc7','#d1e5f0','#92c5de','#4393c3','#2166ac')) +
+#   labs(color = "Condition") +
+#   ggnewscale::new_scale_color() +
+#   geom_line(aes(color = Condition), stat = "smooth",  se = T, show.legend = F) +
+#   geom_ribbon(aes(color = NULL, group = Condition), alpha = 0.2, stat = "smooth", show.legend = F) +
+#   ggpubr::theme_pubr(legend = "right") +
+#   geom_text(x = 85, y = 1500, label = "p < 1e-15", inherit.aes = F, data = data.frame()) +
+#   labs(x = "Time Post-injection (Days)", y = "Tumor Size (unit?)")
+
+fig3b <- ggplot(data = tum_growth_data_summ, aes(x = Time, y = Avg.Vol)) +
+  geom_line(aes(color = paste0(Condition, ", Mouse #", Number)), show.legend = T) +
+  geom_line(aes(color = Condition), stat = "smooth",  se = T, show.legend = F, size = 2) +
+  geom_ribbon(aes(color = NULL, group = Condition), alpha = 0.2, stat = "smooth", show.legend = F) +
+  geom_text(data = NULL, aes(x = 85, y = 1200, label = "p < 0.001"), inherit.aes = F) +
+  color_palette(RColorBrewer::brewer.pal(11, name = "RdBu")[c(3,1:4, 9, 11:8)]) +
+  labs(x = "Time (Days)", y = bquote('Average tumor volume ('*cm^3*')'), color = "Condition") +
+  geom_vline(xintercept = 67, linetype = 2) +
+  ggpubr::theme_pubr(legend = "right") +
+  theme(axis.ticks = element_blank())
+
+ggsave(plot = fig3b, filename = "Figure 3/fig3b.tiff", width = 5, height = 4)
+```
+
+### Figure 3c
+```{r}
+sim_data_pcna <- data.frame(
+  shScrambled = rnorm(n = 5, mean = 65, sd = 10),
+  shXYZ = rnorm(n = 5, mean = 35, sd = 15) 
+)
+
+fig3c = ggplot(data = sim_data_pcna %>%
+         pivot_longer(cols = everything(), names_to = "Condition", values_to = "% PCNA+ Cells"), aes(x = Condition, y = `% PCNA+ Cells`)) +
+  geom_boxplot(aes(fill = Condition)) +
+  ylim(c(0, 100)) +
+  ggsignif::geom_signif(xmin = 1, xmax = 2, y_position = 90, annotations = "p = 0.006", tip_length = 0) +
+  fill_palette("npg") +
+  theme_pubr() +
+  theme(axis.ticks = element_blank())
+
+ggsave(filename = "Figure 3/fig3c.tiff", plot = fig3c, width = 4, height = 5, dpi = 300)
+```
+
+# Figure 4
+
+### Figure 4a
+```{r}
+norm.counts <- read_table("Figure 4/Illumina_HumanHT-12_V4_0_R2_preprocessed_batchcorrected.txt")
+
+# convert illumina IDs to gene symbols
+# obtain counts matrix
+count.mat <- norm.counts %>%
+  mutate(SYMBOL = unlist(mget(Probe_ID, illuminaHumanv4SYMBOL))) %>%
+  mutate(SYMBOL = replace_na(SYMBOL, replace = "")) %>%
+  mutate(SYMBOL = make.unique(SYMBOL)) %>%
+  column_to_rownames(var = "SYMBOL") %>%
+  dplyr::select(-Probe_ID) %>%
+  as.matrix()
+
+sample_df <- data.frame(
+  samples = colnames(count.mat),
+  condition = sapply(colnames(count.mat), function(x) strsplit(x, split = "_")[[1]][1]),
+  rep.number = sapply(colnames(count.mat), function(x) strsplit(x, split = "_")[[1]][2])
+)
+
+# Sample clustering
+heatmaply::heatmaply(cor(count.mat), file = "Figure 4/fig4_heatmap.png")
+
+# Perform GSEA in R
+genesets <- readList(file = "h.all.v7.5.1.symbols.gmt")
+
+gsea_res <- gage(exprs = count.mat, gsets = genesets, ref = c(1,3,5), samp = c(2,4,6), compare = 'as.group')
+
+# Top 5 Up and Down pathways
+top_up <- gsea_res$greater %>%
+  as.data.frame() %>%
+  slice_min(p.val, n = 10)
+
+top_down <- gsea_res$less %>%
+  as.data.frame() %>%
+  slice_min(p.val, n = 10)
+
+# Plot GSEA results
+fig4_df <- rbind(top_up, top_down) %>%
+  rownames_to_column(var = "Pathway") %>%
+  mutate(Pathway = sapply(Pathway, function(x) str_replace_all(x, pattern = "HALLMARK", replacement = ""))) %>%
+  mutate(Pathway = sapply(Pathway, function(x) str_replace_all(x, pattern = "_", replacement = " ")))
+
+ggplot(data = fig4_df %>% filter(q.val < 0.05), aes(x = stat.mean, y = reorder(Pathway, -q.val), fill = q.val)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(high = "#deebf7", low = "#084594") +
+  theme_pubr(base_size = 10, legend = "right") +
+  labs(x = "Enrichment Score", y = "Hallmark Pathways", fill = "Significance (q-value)")
+
+ggsave(filename = "Figure 4/Figure 4a.tiff", width = 10, height = 5)
+  
+
+
+# Perform limma to find DE genes
+fit = limma::lmFit(object = count.mat, design = model.matrix(~sample_df$condition))
+fit <- eBayes(fit, robust = T)
+DEGenes <- as.data.frame(topTable(fit, coef = 2, number = Inf)) %>%
+  rownames_to_column(var = "gene")
+
+fig4b <- ggplot(data = DEGenes, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_point() +
+  ggrepel::geom_label_repel(data = DEGenes %>% slice_min(adj.P.Val, n = 10), mapping = aes(x = logFC, y = -log10(adj.P.Val), label = gene)) +
+  labs(x = "Log2 Fold Change", y = "-log10(P-value)")
+
+ggsave("Fig4b.png", plot = fig4b, width = 5, height = 4, dpi = 300)
+
+# Perform edgeR to find DE genes
+
+
+# Volcano plot of LIMMA results
+
+
+
+## First, get all genes. If duplicated, take average logFC of duplicates
+res <- res %>%
+  rownames_to_column(var = "Gene")
+
+res$Gene.clean <- sapply(res$Gene, function(x) strsplit(x, split = ".", fixed = T)[[1]][1])
+
+res.dedup <- sapply(unique(res$Gene.clean), function(x){
+  x.res <- res %>%
+    filter(Gene.clean == x)
+  
+  if(nrow(x.res)==1){
+    return(x.res)
+  }
+  
+  return(summarize(x.res, Gene = x, logFC = mean(logFC), AveExpr = mean(AveExpr), t = mean(t), P.Value = mean(P.Value), adj.P.Val = mean(adj.P.Val), B = mean(B)))
+}) %>% bind_rows()
+
+## Next, perform fgsea using all MSigDB gene sets
+
+# library(edgeR)
+# y <- edgeR::DGEList(counts = count.mat, samples = sample_df, group = sample_df$condition)
+# design <- model.matrix(~sample_df$condition)
+# y <- estimateDisp(y, pair = c("Scramble", "shXYZ"))
+# 
+# fit = edgeR::exactTest(y, pair = c("Scramble", "shXYZ"))
+# res.table <- fit$table
+# 
+# label.table <- res.table %>%
+#   slice_min(PValue, n = 10) %>%
+#   rownames_to_column(var = "Symbol")
+# 
+# ggplot(data = res.table, aes(x = logFC, y = -log10(PValue))) +
+#   geom_point() +
+#   geom_label(data = label.table, aes(label = Symbol))
+
+
+```
